@@ -45,6 +45,7 @@ private:
     // die边界位置
     vector<double> die_boundaries = {120.0, 240.0, 360.0};  // die0|1, die1|2, die2|3的边界
 
+
 public:
     string filename;  // 文件名
 
@@ -691,7 +692,7 @@ public:
             result = fixed_result;
             cout << "      After splitting: " << result.size() << " clusters" << endl;
         } else {
-            cout << "   All clusters within size limit." << endl;
+            cout << "  ✓ All clusters within size limit." << endl;
         }
 
         // 统计
@@ -733,7 +734,7 @@ public:
         return result;
     }
 
-    // 输出超节点到文件
+    // 输出超节点到文件（详细版，用于查看）
     void outputSupernodes(const vector<unordered_set<int>>& supernodes, const string& filename) {
         ofstream file(filename);
         if (!file.is_open()) {
@@ -752,13 +753,113 @@ public:
         }
 
         file.close();
-        cout << "\nSupernodes written to file: " << filename << endl;
+        cout << "\nDetailed supernodes written to: " << filename << endl;
+    }
+
+    // 输出给move程序使用的文件（超节点图）
+    void outputForMoveProgram(const vector<unordered_set<int>>& supernodes,
+                              const string& placement_file,
+                              const string& netlist_file) {
+        cout << "\nGenerating files for move program..." << endl;
+
+        // ========== 文件1: 超节点坐标文件 (.pl格式) ==========
+        ofstream pl_file(placement_file);
+        if (!pl_file.is_open()) {
+            cerr << "Cannot create placement file: " << placement_file << endl;
+            return;
+        }
+
+        // 为每个超节点计算代表坐标（平均值）和die
+        for (size_t i = 0; i < supernodes.size(); i++) {
+            double avg_x = 0, avg_y = 0;
+            int die = -1;
+
+            // 计算平均坐标
+            for (int idx : supernodes[i]) {
+                const auto& inst = instances[idx_to_inst[idx]];
+                avg_x += inst.x;
+                avg_y += inst.y;
+                if (die == -1) die = inst.die;  // 取第一个实例的die
+            }
+
+            avg_x /= supernodes[i].size();
+            avg_y /= supernodes[i].size();
+
+            // 输出格式: supernode_ID x y die
+            pl_file << "supernode_" << i << " "
+                    << (int)avg_x << " " << (int)avg_y << " " << die << endl;
+        }
+
+        pl_file.close();
+        cout << "  Placement file: " << placement_file << endl;
+        cout << "    Format: supernode_ID x y die" << endl;
+        cout << "    Supernodes: " << supernodes.size() << endl;
+
+        // ========== 文件2: 超节点网络连接 (.net格式) ==========
+        ofstream net_file(netlist_file);
+        if (!net_file.is_open()) {
+            cerr << "Cannot create netlist file: " << netlist_file << endl;
+            return;
+        }
+
+        // 建立节点索引到超节点ID的映射
+        unordered_map<int, int> node_to_supernode;
+        for (size_t i = 0; i < supernodes.size(); i++) {
+            for (int idx : supernodes[i]) {
+                node_to_supernode[idx] = i;
+            }
+        }
+
+        // 统计超节点之间的连接
+        map<pair<int, int>, int> supernode_edges;  // (sn_i, sn_j) -> 连接数
+
+        for (const auto& [node_i, neighbors] : adj_list) {
+            int sn_i = node_to_supernode[node_i];
+
+            for (int node_j : neighbors) {
+                if (node_to_supernode.find(node_j) == node_to_supernode.end()) continue;
+
+                int sn_j = node_to_supernode[node_j];
+
+                // 只记录不同超节点之间的连接
+                if (sn_i != sn_j && sn_i < sn_j) {
+                    supernode_edges[{sn_i, sn_j}]++;
+                }
+            }
+        }
+
+        // 输出格式: net_ID supernode_list weight
+        int net_id = 0;
+        for (const auto& [edge, weight] : supernode_edges) {
+            net_file << "net_" << net_id << " "
+                     << "supernode_" << edge.first << " "
+                     << "supernode_" << edge.second << " "
+                     << weight << endl;
+            net_id++;
+        }
+
+        net_file.close();
+        cout << "  Netlist file: " << netlist_file << endl;
+        cout << "    Format: net_ID supernode_i supernode_j weight" << endl;
+        cout << "    Total nets (edges): " << supernode_edges.size() << endl;
+
+        // 统计跨die的cut
+        int total_cuts = 0;
+        for (const auto& [edge, weight] : supernode_edges) {
+            int die_i = instances[idx_to_inst[*supernodes[edge.first].begin()]].die;
+            int die_j = instances[idx_to_inst[*supernodes[edge.second].begin()]].die;
+            if (die_i != die_j) {
+                total_cuts += weight;
+            }
+        }
+        cout << "    Cross-die cuts: " << total_cuts << endl;
+
+        cout << "\n✓ Files generated for move program successfully!" << endl;
     }
 
     // 完整粗化流程
-    void coarsen(double boundary_threshold = 15.0, int target_cluster_count = 1000,
-                 int max_net_size = 100, int max_cluster_size = 50,
-                 const string& output_file = "supernodes.txt") {
+    vector<unordered_set<int>> coarsen(double boundary_threshold = 15.0, int target_cluster_count = 1000,
+                                       int max_net_size = 100, int max_cluster_size = 50) {
         cout << "\n========================================" << endl;
         cout << "Graph Coarsening - FPGA Netlist (Die Boundary)" << endl;
         cout << "========================================" << endl;
@@ -768,7 +869,7 @@ public:
 
         if (boundary_node_names.empty()) {
             cout << "Warning: No boundary nodes!" << endl;
-            return;
+            return vector<unordered_set<int>>();
         }
 
         // 2. 只为边界节点建图
@@ -812,10 +913,7 @@ public:
             cout << "..." << endl;
         }
 
-        // 5. 输出到文件
-        if (!output_file.empty()) {
-            outputSupernodes(supernodes, output_file);
-        }
+        return supernodes;
     }
 };
 
@@ -839,13 +937,39 @@ int main() {
         return 1;
     }
 
-    // 执行粗化（内部会自动筛选边界节点并建图）
+    // 执行粗化
     // boundary_threshold: 边界距离阈值 (<=15)
-    // target_cluster_count: 目标簇数量 (<1000 停止合并)
+    // target_cluster_count: 目标簇数量 (达到1000停止)
     // max_net_size: net大小阈值，超过则用星形拓扑
     // max_cluster_size: 簇大小上限（控制均匀性）
-    string output_file = "supernodes_" + reader.filename + ".txt";
-    reader.coarsen(15.0, 1000, 100, 50, output_file);
+    auto supernodes = reader.coarsen(15.0, 1000, 100, 50);
+
+    if (supernodes.empty()) {
+        std::cerr << "Coarsening failed\n";
+        return 1;
+    }
+
+    // 生成move程序需要的文件（必需）
+    string coarsened_pl = "coarsened_" + reader.filename.substr(0, reader.filename.find_last_of('.')) + ".pl";
+    string coarsened_net = "coarsened_" + reader.filename.substr(0, reader.filename.find_last_of('.')) + ".net";
+    reader.outputForMoveProgram(supernodes, coarsened_pl, coarsened_net);
+
+    // 可选：生成详细的超节点列表（用于查看调试）
+    bool output_detailed = false;  // 改成true以生成详细列表
+    if (output_detailed) {
+        string detailed_file = "supernodes_" + reader.filename;
+        reader.outputSupernodes(supernodes, detailed_file);
+        cout << "\nDetailed supernodes list: " << detailed_file << endl;
+    }
+
+    cout << "\n========================================" << endl;
+    cout << "Output files generated:" << endl;
+    cout << "  1. " << coarsened_pl << " (for move program)" << endl;
+    cout << "  2. " << coarsened_net << " (for move program)" << endl;
+    if (output_detailed) {
+        cout << "  3. supernodes_*.txt (detailed view)" << endl;
+    }
+    cout << "========================================" << endl;
 
     return 0;
 }
