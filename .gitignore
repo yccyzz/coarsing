@@ -69,7 +69,8 @@ secrets.yml
 *.db
 *.sqlite
 *.sqlite3
-
+*.net
+*.pl
 # 打包文件
 *.zip
 *.tar.gz
