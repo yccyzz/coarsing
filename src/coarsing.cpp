@@ -105,7 +105,7 @@ public:
                         int die = stoi(token3);
                         inst.die = die;
 
-                        inst.y = die * 120.0 + 60.0;
+                        inst.y = die * 120.0 + 120.0;
 
                         if (iss >> token4 && token4 == "FIXED") {
                             inst.is_fixed = true;
@@ -160,7 +160,7 @@ public:
             // 匹配实例声明行
             smatch match;
             if (regex_search(line, match, inst_regex)) {
-                // 如果之前有实例，先保存
+                // 如果之前有实例,先保存
                 if (!current_inst_name.empty()) {
                     saveInstance(current_inst_name, current_inst_type, current_nets);
                 }
@@ -200,17 +200,17 @@ public:
             instances[name].type = type;
             instances[name].nets = nets;
 
-            // 建立net到instance的反向映射（只针对非FIXED实例）
+            // 建立net到instance的反向映射(只针对非FIXED实例)
             for (const auto& net : nets) {
                 net_to_insts[net].push_back(name);
             }
         } else if (fixed_instances.find(name) != fixed_instances.end()) {
-            // FIXED 实例也更新类型和nets，但不参与图构建
+            // FIXED 实例也更新类型和nets,但不参与图构建
             fixed_instances[name].type = type;
             fixed_instances[name].nets = nets;
         } else {
             // 如果实例既不在 instances 也不在 fixed_instances 中
-            // 创建新实例（默认非FIXED）
+            // 创建新实例(默认非FIXED)
             Instance inst;
             inst.name = name;
             inst.type = type;
@@ -252,7 +252,7 @@ public:
 
     // 只为边界节点构建图
     void buildGraphForBoundaryNodes(int max_net_size = 100) {
-        cout << "\nBuilding graph for boundary nodes only..." << endl;
+        cout << "\nBuilding graph" << endl;
 
         // 清空现有的索引和邻接表
         inst_to_idx.clear();
@@ -288,7 +288,7 @@ public:
             size_t net_size = boundary_insts.size();
             if (net_size <= 1) continue;
 
-            // 限制：只连接同一边界的节点（避免跨边界聚类）
+            // 限制:只连接同一边界的节点(避免跨边界聚类)
             unordered_map<int, vector<string>> boundary_groups;
             for (const auto& inst_name : boundary_insts) {
                 int boundary_id = node_boundary_id[inst_name];
@@ -322,7 +322,6 @@ public:
                 }
             }
         }
-
     }
 
     // 改进的聚类算法
@@ -349,8 +348,10 @@ public:
 
 
         vector<unordered_set<int>> result;
-
-        for (int boundary_id = 0; boundary_id < 3; boundary_id++) {
+        cout << "222" << endl;
+        size_t boundary_count = std::min(boundary_node_lists.size(),
+                                         target_clusters_per_boundary.size());
+        for (size_t boundary_id = 0; boundary_id < boundary_count; boundary_id++) {
             const auto& nodes = boundary_node_lists[boundary_id];
             if (nodes.empty()) continue;
 
@@ -359,7 +360,7 @@ public:
 
             result.insert(result.end(), clusters.begin(), clusters.end());
         }
-
+        cout << "333333" << endl;
         bool need_split = false;
         for (const auto& cluster : result) {
             if ((int)cluster.size() > max_cluster_size) {
@@ -367,7 +368,7 @@ public:
                 break;
             }
         }
-
+        cout << "444444" << endl;
         if (need_split) {
             vector<unordered_set<int>> fixed_result;
 
@@ -411,6 +412,7 @@ public:
         return result;
     }
 
+    // 【修复后的版本】
     vector<unordered_set<int>> clusterBoundary(const vector<int>& nodes,
                                                int target_count,
                                                int max_size) {
@@ -427,15 +429,24 @@ public:
             return result;
         }
 
+        // 【关键修复】创建节点索引到数组位置的映射
+        unordered_map<int, int> node_to_pos;
+        for (int i = 0; i < n; i++) {
+            node_to_pos[nodes[i]] = i;
+        }
+
         vector<bool> visited(n, false);
         vector<unordered_set<int>> clusters;
 
         vector<int> shuffled_nodes = nodes;
         unsigned seed = chrono::steady_clock::now().time_since_epoch().count();
         shuffle(shuffled_nodes.begin(), shuffled_nodes.end(), default_random_engine(seed));
+
         // BFS聚类
         for (int start_idx : shuffled_nodes) {
-            if (visited[inst_to_idx[idx_to_inst[start_idx]] - inst_to_idx[idx_to_inst[nodes[0]]]]) {
+            // 【修复】使用映射查找位置
+            int start_pos = node_to_pos[start_idx];
+            if (visited[start_pos]) {
                 continue;
             }
 
@@ -447,15 +458,11 @@ public:
                 int curr = q.front();
                 q.pop();
 
-                int curr_pos = -1;
-                for (int i = 0; i < n; i++) {
-                    if (nodes[i] == curr) {
-                        curr_pos = i;
-                        break;
-                    }
-                }
+                // 【修复】使用映射查找位置
+                if (node_to_pos.find(curr) == node_to_pos.end()) continue;
+                int curr_pos = node_to_pos[curr];
 
-                if (curr_pos == -1 || visited[curr_pos]) continue;
+                if (visited[curr_pos]) continue;
 
                 visited[curr_pos] = true;
                 cluster.insert(curr);
@@ -463,24 +470,10 @@ public:
                 // 将邻居加入队列
                 if (adj_list.count(curr)) {
                     for (int neighbor : adj_list[curr]) {
-                        bool is_boundary_neighbor = false;
-                        for (int node : nodes) {
-                            if (node == neighbor) {
-                                is_boundary_neighbor = true;
-                                break;
-                            }
-                        }
-
-                        if (is_boundary_neighbor) {
-                            int neighbor_pos = -1;
-                            for (int i = 0; i < n; i++) {
-                                if (nodes[i] == neighbor) {
-                                    neighbor_pos = i;
-                                    break;
-                                }
-                            }
-
-                            if (neighbor_pos != -1 && !visited[neighbor_pos]) {
+                        // 【修复】使用映射判断是否在边界节点中
+                        if (node_to_pos.find(neighbor) != node_to_pos.end()) {
+                            int neighbor_pos = node_to_pos[neighbor];
+                            if (!visited[neighbor_pos]) {
                                 q.push(neighbor);
                             }
                         }
@@ -493,6 +486,7 @@ public:
             }
         }
 
+        // 处理剩余未访问的节点
         for (int i = 0; i < n; i++) {
             if (!visited[i]) {
                 if (!clusters.empty()) {
@@ -547,7 +541,7 @@ public:
             }
         }
 
-        // 2. 找出“内部点”(Inner Nodes)：即非 Fixed 且 未被粗化 的点
+        // 2. 找出"内部点"(Inner Nodes):即非 Fixed 且 未被粗化 的点
         vector<string> inner_node_names;
         for (const auto& [name, inst] : instances) {
             if (coarsened_inst_names.find(name) == coarsened_inst_names.end()) {
@@ -569,26 +563,28 @@ public:
         }
 
         for (const string& name : fixed_node_names) {
-            if (instances.count(name) == 0) {
-                cerr << "WARNING: Inner node instance '" << name << "' not found in 'instances' map. Skipping." << endl;
+            if (fixed_instances.count(name) == 0) {
+                cerr << "WARNING: Fixed node instance '" << name << "' not found in 'fixed_instances' map. Skipping." << endl;
                 continue;
             }
-            const auto& inst = instances.at(name);
+            const auto& inst = fixed_instances.at(name);
             pl_file << name << " " << (int)inst.y << " " << inst.die << " FIXED" << endl;
         }
 
         for (const string& name : inner_node_names) {
             const auto& inst = instances.at(name);
-            if(inst.die == -1) continue;
+//            if(inst.die == -1) continue;
             pl_file << name << " " << (int)inst.y << " " << inst.die << endl;
         }
 
         for (size_t i = 0; i < supernodes.size(); i++) {
             int die = -1;
+            double y_coord = 0.0;
             if (!supernodes[i].empty()) {
                 die = instances[idx_to_inst[*supernodes[i].begin()]].die;
+                y_coord = die * 120.0 + 60.0;  // 每个die高度120，中心位置+60
             }
-            pl_file << "supernode_" << i << die * 60 + 120.0<< die << endl;
+            pl_file << "supernode_" << i << " " << y_coord << " " << die << endl;
         }
         pl_file.close();
         ofstream net_file(netlist_file);
@@ -631,7 +627,7 @@ public:
 
                     if (net_to_insts.count(net)) {
                         for (const string& connected_inst : net_to_insts[net]) {
-                            // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射)，则为外部Net
+                            // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射),则为外部Net
                             auto it = inst_to_cluster_name.find(connected_inst);
                             if (it == inst_to_cluster_name.end() || it->second != cluster_name) {
                                 is_external = true;
@@ -643,7 +639,6 @@ public:
                 }
             }
 
-            // 【主要修改】在 cluster_name 前输出 cluster_type
             net_file << cluster_type << " " << cluster_name << " (" << endl;
             vector<string> sorted_nets(boundary_nets.begin(), boundary_nets.end());
             sort(sorted_nets.begin(), sorted_nets.end());
@@ -728,6 +723,7 @@ public:
 
         auto supernodes =
                 improvedClustering(target_cluster_count, max_cluster_size);
+        cout<<"coarse end"<<endl;
         return supernodes;
     }
 };
