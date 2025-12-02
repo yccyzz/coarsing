@@ -105,7 +105,7 @@ public:
                         int die = stoi(token3);
                         inst.die = die;
 
-                        inst.y = die * 120.0 + 120.0;
+                        inst.y = die * 120.0 + 60.0;
 
                         if (iss >> token4 && token4 == "FIXED") {
                             inst.is_fixed = true;
@@ -348,7 +348,6 @@ public:
 
 
         vector<unordered_set<int>> result;
-        cout << "222" << endl;
         size_t boundary_count = std::min(boundary_node_lists.size(),
                                          target_clusters_per_boundary.size());
         for (size_t boundary_id = 0; boundary_id < boundary_count; boundary_id++) {
@@ -360,7 +359,6 @@ public:
 
             result.insert(result.end(), clusters.begin(), clusters.end());
         }
-        cout << "333333" << endl;
         bool need_split = false;
         for (const auto& cluster : result) {
             if ((int)cluster.size() > max_cluster_size) {
@@ -368,7 +366,6 @@ public:
                 break;
             }
         }
-        cout << "444444" << endl;
         if (need_split) {
             vector<unordered_set<int>> fixed_result;
 
