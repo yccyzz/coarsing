@@ -146,9 +146,21 @@ public:
         vector<string> current_nets;
 
         regex inst_regex(R"(^(\w+)\s+(\w+)\s*\()");  // 匹配 "FDRE inst_19132 ("
-        regex net_regex(R"(\.(\w+)\(([\w_]+)\))");    // 匹配 ".Q(net_19079)"
+
+        // 【关键修改】支持数组索引的引脚名，如 .B[6](), .A[3:0](net)
+        // \.(\w+(?:\[\d+(?::\d+)?\])?) 匹配：
+        //   - \w+ : 引脚名（如 B, CLK, OUT）
+        //   - (?:\[\d+(?::\d+)?\])? : 可选的数组索引
+        //     - \[\d+\] : 单个索引，如 [6]
+        //     - \[\d+:\d+\] : 范围索引，如 [3:0]
+        // \(([^\)]*)\) 匹配：
+        //   - 括号内的任何非右括号字符（网络名）
+        regex net_regex(R"(\.(\w+(?:\[\d+(?::\d+)?\])?)\(([^\)]*)\))");
 
         cout << "\nParsing netlist file: " << filename << endl;
+
+        int total_instances = 0;
+        int total_nets = 0;
 
         while (getline(file, line)) {
             // 去除前后空格
@@ -163,6 +175,7 @@ public:
                 // 如果之前有实例,先保存
                 if (!current_inst_name.empty()) {
                     saveInstance(current_inst_name, current_inst_type, current_nets);
+                    total_instances++;
                 }
 
                 // 开始新实例
@@ -174,14 +187,29 @@ public:
             // 提取net连接
             string::const_iterator search_start(line.cbegin());
             while (regex_search(search_start, line.cend(), match, net_regex)) {
-                string net_name = match[2];
-                current_nets.push_back(net_name);
+                string pin_name = match[1].str();  // 引脚名（可能包含数组索引）
+                string net_name = match[2].str();  // 网络名
+
+                // 去除前后空格
+                net_name.erase(0, net_name.find_first_not_of(" \t"));
+                net_name.erase(net_name.find_last_not_of(" \t") + 1);
+
+                // 过滤空连接、特殊占位符和常量
+                if (!net_name.empty() &&
+                    net_name != "UNCONNECTED" &&
+                    net_name != "NC" &&
+                    net_name.find("'b") == string::npos) {  // 过滤 1'b0, 1'b1
+                    current_nets.push_back(net_name);
+                    total_nets++;
+                }
+
                 search_start = match.suffix().first;
             }
 
             // 如果遇到 ); 表示实例结束
             if (line.find(");") != string::npos && !current_inst_name.empty()) {
                 saveInstance(current_inst_name, current_inst_type, current_nets);
+                total_instances++;
                 current_inst_name.clear();
                 current_nets.clear();
             }
@@ -190,6 +218,14 @@ public:
         file.close();
 
         cout << "Parsing completed!" << endl;
+        cout << "  Total instances: " << total_instances << endl;
+        cout << "  Total nets: " << total_nets << endl;
+        if (total_instances > 0) {
+            cout << "  Avg nets per instance: "
+                 << fixed << setprecision(2)
+                 << (double)total_nets / total_instances << endl;
+        }
+
         return true;
     }
 
@@ -570,7 +606,7 @@ public:
 
         for (const string& name : inner_node_names) {
             const auto& inst = instances.at(name);
-//            if(inst.die == -1) continue;
+            if(inst.die == -1) continue;
             pl_file << name << " " << (int)inst.y << " " << inst.die << endl;
         }
 
@@ -619,19 +655,30 @@ public:
                 if (!nets_ptr) continue;
 
                 for (const string& net : *nets_ptr) {
-                    // 判断该 net 是否连接到当前 Cluster 外部
                     bool is_external = false;
 
-                    if (net_to_insts.count(net)) {
-                        for (const string& connected_inst : net_to_insts[net]) {
-                            // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射),则为外部Net
-                            auto it = inst_to_cluster_name.find(connected_inst);
-                            if (it == inst_to_cluster_name.end() || it->second != cluster_name) {
-                                is_external = true;
-                                break;
+                    // 【修改】单实例模块（如IBUF）输出所有网络
+                    // 因为这些网络可能连接到外部端口或未包含在网表中的模块
+                    if (internal_insts.size() == 1) {
+                        is_external = true;
+                    } else {
+                        // 多实例簇：判断网络是否连接到外部
+                        if (net_to_insts.count(net)) {
+                            for (const string& connected_inst : net_to_insts[net]) {
+                                // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射),则为外部Net
+                                auto it = inst_to_cluster_name.find(connected_inst);
+                                if (it == inst_to_cluster_name.end() || it->second != cluster_name) {
+                                    is_external = true;
+                                    break;
+                                }
                             }
+                        } else {
+                            // 【新增】如果net_to_insts中没有这个网络，也输出
+                            // 可能连接到外部端口
+                            is_external = true;
                         }
                     }
+
                     if (is_external) boundary_nets.insert(net);
                 }
             }
