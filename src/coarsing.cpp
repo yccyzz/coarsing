@@ -14,6 +14,7 @@
 #include <functional>
 #include <random>
 #include <chrono>
+#include <iomanip> // added for setprecision
 
 using namespace std;
 
@@ -145,16 +146,7 @@ public:
         string current_inst_type;
         vector<string> current_nets;
 
-        regex inst_regex(R"(^(\w+)\s+(\w+)\s*\()");  // 匹配 "FDRE inst_19132 ("
-
-        // 【关键修改】支持数组索引的引脚名，如 .B[6](), .A[3:0](net)
-        // \.(\w+(?:\[\d+(?::\d+)?\])?) 匹配：
-        //   - \w+ : 引脚名（如 B, CLK, OUT）
-        //   - (?:\[\d+(?::\d+)?\])? : 可选的数组索引
-        //     - \[\d+\] : 单个索引，如 [6]
-        //     - \[\d+:\d+\] : 范围索引，如 [3:0]
-        // \(([^\)]*)\) 匹配：
-        //   - 括号内的任何非右括号字符（网络名）
+        regex inst_regex(R"(^(\w+)\s+(\w+)\s*\()");
         regex net_regex(R"(\.(\w+(?:\[\d+(?::\d+)?\])?)\(([^\)]*)\))");
 
         cout << "\nParsing netlist file: " << filename << endl;
@@ -163,42 +155,35 @@ public:
         int total_nets = 0;
 
         while (getline(file, line)) {
-            // 去除前后空格
             line.erase(0, line.find_first_not_of(" \t"));
             line.erase(line.find_last_not_of(" \t") + 1);
 
             if (line.empty() || line[0] == '#') continue;
 
-            // 匹配实例声明行
             smatch match;
             if (regex_search(line, match, inst_regex)) {
-                // 如果之前有实例,先保存
                 if (!current_inst_name.empty()) {
                     saveInstance(current_inst_name, current_inst_type, current_nets);
                     total_instances++;
                 }
 
-                // 开始新实例
                 current_inst_type = match[1];
                 current_inst_name = match[2];
                 current_nets.clear();
             }
 
-            // 提取net连接
             string::const_iterator search_start(line.cbegin());
             while (regex_search(search_start, line.cend(), match, net_regex)) {
-                string pin_name = match[1].str();  // 引脚名（可能包含数组索引）
-                string net_name = match[2].str();  // 网络名
+                string pin_name = match[1].str();
+                string net_name = match[2].str();
 
-                // 去除前后空格
                 net_name.erase(0, net_name.find_first_not_of(" \t"));
                 net_name.erase(net_name.find_last_not_of(" \t") + 1);
 
-                // 过滤空连接、特殊占位符和常量
                 if (!net_name.empty() &&
                     net_name != "UNCONNECTED" &&
                     net_name != "NC" &&
-                    net_name.find("'b") == string::npos) {  // 过滤 1'b0, 1'b1
+                    net_name.find("'b") == string::npos) {
                     current_nets.push_back(net_name);
                     total_nets++;
                 }
@@ -206,7 +191,6 @@ public:
                 search_start = match.suffix().first;
             }
 
-            // 如果遇到 ); 表示实例结束
             if (line.find(");") != string::npos && !current_inst_name.empty()) {
                 saveInstance(current_inst_name, current_inst_type, current_nets);
                 total_instances++;
@@ -231,22 +215,22 @@ public:
 
     // 保存实例信息
     void saveInstance(const string& name, const string& type, const vector<string>& nets) {
-        // 【修改】只保存非FIXED实例的类型和nets
         if (instances.find(name) != instances.end()) {
             instances[name].type = type;
             instances[name].nets = nets;
 
-            // 建立net到instance的反向映射(只针对非FIXED实例)
             for (const auto& net : nets) {
                 net_to_insts[net].push_back(name);
             }
         } else if (fixed_instances.find(name) != fixed_instances.end()) {
-            // FIXED 实例也更新类型和nets,但不参与图构建
             fixed_instances[name].type = type;
             fixed_instances[name].nets = nets;
+            // 【修改】Fixed 实例也需要建立 net 到 instance 的映射
+            // 否则在判断外部连接时会忽略连接到 Fixed 实例的 Net
+            for (const auto& net : nets) {
+                net_to_insts[net].push_back(name);
+            }
         } else {
-            // 如果实例既不在 instances 也不在 fixed_instances 中
-            // 创建新实例(默认非FIXED)
             Instance inst;
             inst.name = name;
             inst.type = type;
@@ -266,12 +250,11 @@ public:
         boundary_node_names.clear();
         node_boundary_id.clear();
 
-        vector<int> boundary_counts(3, 0);  // 每个边界的节点数
+        vector<int> boundary_counts(3, 0);
 
-        for (const auto& [name, inst] : instances) {  // 只考虑非FIXED实例
+        for (const auto& [name, inst] : instances) {
             double y = inst.y;
 
-            // 检查每个边界
             for (size_t i = 0; i < die_boundaries.size(); i++) {
                 double boundary = die_boundaries[i];
                 double dist = abs(y - boundary);
@@ -280,29 +263,25 @@ public:
                     boundary_node_names.insert(name);
                     node_boundary_id[name] = i;
                     boundary_counts[i]++;
-                    break;  // 一个节点只属于一个边界
+                    break;
                 }
             }
         }
     }
 
-    // 只为边界节点构建图
     void buildGraphForBoundaryNodes(int max_net_size = 100) {
         cout << "\nBuilding graph" << endl;
 
-        // 清空现有的索引和邻接表
         inst_to_idx.clear();
         idx_to_inst.clear();
         adj_list.clear();
         idx_boundary_id.clear();
 
-        // 只为边界节点建立索引
         int idx = 0;
         for (const string& name : boundary_node_names) {
             inst_to_idx[name] = idx;
             idx_to_inst.push_back(name);
 
-            // 同时记录这个idx对应的边界ID
             idx_boundary_id[idx] = node_boundary_id[name];
 
             idx++;
@@ -324,7 +303,6 @@ public:
             size_t net_size = boundary_insts.size();
             if (net_size <= 1) continue;
 
-            // 限制:只连接同一边界的节点(避免跨边界聚类)
             unordered_map<int, vector<string>> boundary_groups;
             for (const auto& inst_name : boundary_insts) {
                 int boundary_id = node_boundary_id[inst_name];
@@ -360,7 +338,6 @@ public:
         }
     }
 
-    // 改进的聚类算法
     vector<unordered_set<int>> improvedClustering(int target_cluster_count = 1000,
                                                   int max_cluster_size = 50) {
 
@@ -445,7 +422,6 @@ public:
         return result;
     }
 
-    // 【修复后的版本】
     vector<unordered_set<int>> clusterBoundary(const vector<int>& nodes,
                                                int target_count,
                                                int max_size) {
@@ -462,7 +438,6 @@ public:
             return result;
         }
 
-        // 【关键修复】创建节点索引到数组位置的映射
         unordered_map<int, int> node_to_pos;
         for (int i = 0; i < n; i++) {
             node_to_pos[nodes[i]] = i;
@@ -475,9 +450,7 @@ public:
         unsigned seed = chrono::steady_clock::now().time_since_epoch().count();
         shuffle(shuffled_nodes.begin(), shuffled_nodes.end(), default_random_engine(seed));
 
-        // BFS聚类
         for (int start_idx : shuffled_nodes) {
-            // 【修复】使用映射查找位置
             int start_pos = node_to_pos[start_idx];
             if (visited[start_pos]) {
                 continue;
@@ -491,7 +464,6 @@ public:
                 int curr = q.front();
                 q.pop();
 
-                // 【修复】使用映射查找位置
                 if (node_to_pos.find(curr) == node_to_pos.end()) continue;
                 int curr_pos = node_to_pos[curr];
 
@@ -500,10 +472,8 @@ public:
                 visited[curr_pos] = true;
                 cluster.insert(curr);
 
-                // 将邻居加入队列
                 if (adj_list.count(curr)) {
                     for (int neighbor : adj_list[curr]) {
-                        // 【修复】使用映射判断是否在边界节点中
                         if (node_to_pos.find(neighbor) != node_to_pos.end()) {
                             int neighbor_pos = node_to_pos[neighbor];
                             if (!visited[neighbor_pos]) {
@@ -519,7 +489,6 @@ public:
             }
         }
 
-        // 处理剩余未访问的节点
         for (int i = 0; i < n; i++) {
             if (!visited[i]) {
                 if (!clusters.empty()) {
@@ -574,7 +543,6 @@ public:
             }
         }
 
-        // 2. 找出"内部点"(Inner Nodes):即非 Fixed 且 未被粗化 的点
         vector<string> inner_node_names;
         for (const auto& [name, inst] : instances) {
             if (coarsened_inst_names.find(name) == coarsened_inst_names.end()) {
@@ -615,7 +583,7 @@ public:
             double y_coord = 0.0;
             if (!supernodes[i].empty()) {
                 die = instances[idx_to_inst[*supernodes[i].begin()]].die;
-                y_coord = die * 120.0 + 60.0;  // 每个die高度120，中心位置+60
+                y_coord = die * 120.0 + 60.0;
             }
             pl_file << "supernode_" << i << " " << y_coord << " " << die << endl;
         }
@@ -647,7 +615,7 @@ public:
             unordered_set<string> boundary_nets;
 
             for (const string& inst_name : internal_insts) {
-                // 获取实例引用 (可能在 instances 或 fixed_instances 中)
+                // 获取实例引用
                 const vector<string>* nets_ptr = nullptr;
                 if (instances.count(inst_name)) nets_ptr = &instances.at(inst_name).nets;
                 else if (fixed_instances.count(inst_name)) nets_ptr = &fixed_instances.at(inst_name).nets;
@@ -657,26 +625,20 @@ public:
                 for (const string& net : *nets_ptr) {
                     bool is_external = false;
 
-                    // 【修改】单实例模块（如IBUF）输出所有网络
-                    // 因为这些网络可能连接到外部端口或未包含在网表中的模块
-                    if (internal_insts.size() == 1) {
-                        is_external = true;
-                    } else {
-                        // 多实例簇：判断网络是否连接到外部
-                        if (net_to_insts.count(net)) {
-                            for (const string& connected_inst : net_to_insts[net]) {
-                                // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射),则为外部Net
-                                auto it = inst_to_cluster_name.find(connected_inst);
-                                if (it == inst_to_cluster_name.end() || it->second != cluster_name) {
-                                    is_external = true;
-                                    break;
-                                }
+                    // 【关键修改】不再对单实例模块直接视为is_external
+                    // 而是严格检查该Net是否连接到了当前Cluster之外的节点
+                    if (net_to_insts.count(net)) {
+                        for (const string& connected_inst : net_to_insts[net]) {
+                            // 如果连接的实例属于不同的 Cluster (或未找到Cluster映射),则为外部Net
+                            auto it = inst_to_cluster_name.find(connected_inst);
+                            if (it == inst_to_cluster_name.end() || it->second != cluster_name) {
+                                is_external = true;
+                                break;
                             }
-                        } else {
-                            // 【新增】如果net_to_insts中没有这个网络，也输出
-                            // 可能连接到外部端口
-                            is_external = true;
                         }
+                    } else {
+                        // 如果net_to_insts中没有这个网络，说明连接到未解析的外部端口或IO
+                        is_external = true;
                     }
 
                     if (is_external) boundary_nets.insert(net);
@@ -696,12 +658,12 @@ public:
         };
         for (const string& name : fixed_node_names) {
             const auto& inst = fixed_instances.at(name);
-            write_module(name, {name}, inst.type); // 使用其自身的类型
+            write_module(name, {name}, inst.type);
         }
 
         for (const string& name : inner_node_names) {
             const auto& inst = instances.at(name);
-            write_module(name, {name}, inst.type); // 使用其自身的类型
+            write_module(name, {name}, inst.type);
         }
 
         for (size_t i = 0; i < supernodes.size(); i++) {
